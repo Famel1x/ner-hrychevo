@@ -4,6 +4,6 @@
   "sep_used": ";",
   "text_col": "sample",
   "ann_col": "annotation",
-  "val_size": 0.0,
+  "val_size": 0.1,
   "seed": 42
 }
