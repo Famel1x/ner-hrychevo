@@ -1,0 +1,11 @@
+{
+  "total_rows": 27251,
+  "converted_records": 27251,
+  "bad_rows_label_mismatch": 0,
+  "tokenizer": "hf:ai-forever/ruBert-base",
+  "sep_used": ";",
+  "outputs": {
+    "jsonl": "./x5_bio_rubert\\train_bio.jsonl",
+    "conll": "./x5_bio_rubert\\train_bio.conll"
+  }
+}
