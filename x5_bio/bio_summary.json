@@ -1,11 +1,9 @@
 {
   "total_rows": 27251,
-  "converted_records": 27251,
   "bad_rows_label_mismatch": 0,
-  "tokenizer": "regex",
-  "sep_used": ";",
+  "tokenizer": "hf:ai-forever/ruBert-base",
   "outputs": {
-    "jsonl": "./x5_bio\\train_bio.jsonl",
-    "conll": "./x5_bio\\train_bio.conll"
+    "jsonl": "./x5_bio_test\\train_bio.jsonl",
+    "conll": "./x5_bio_test\\train_bio.conll"
   }
 }
