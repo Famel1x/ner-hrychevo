@@ -1,13 +1,20 @@
 from __future__ import annotations
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Set
+import re
 
-VALID_KINDS = {"TYPE", "BRAND", "VOLUME", "PERCENT"}
+VALID_KINDS: Set[str] = {"TYPE", "BRAND", "VOLUME", "PERCENT"}
+
+# стоп-слова, после которых TYPE обрезаем (в gold «хвост» часто O)
+STOP_INSIDE_TYPE = {
+    "для","в","во","с","со","без","на","по","от","из","под","над","при","к","о","об","обо","про"
+}
+
+# Регексы для юнитов/процентов (можно использовать после BIO-постпроцесса)
+RE_VOL = re.compile(r'(\d+[.,]?\d*)\s?(мл|л|г|кг|шт)\b', re.I | re.U)
+RE_PCT = re.compile(r'(\d+[.,]?\d*)\s?%', re.U)
 
 def _bio_to_token_spans(labels: List[str]) -> List[Tuple[int,int,str]]:
-    """
-    BIO -> список (start_tok, end_tok_exclusive, kind).
-    Робастно: I без B начинает новую сущность.
-    """
+    """BIO -> (start_tok, end_tok_exclusive, kind); I без B стартует новую сущность."""
     spans: List[Tuple[int,int,str]] = []
     start: Optional[int] = None
     cur: Optional[str] = None
@@ -22,7 +29,6 @@ def _bio_to_token_spans(labels: List[str]) -> List[Tuple[int,int,str]]:
         else:
             pref, k = "B", lab
         if k not in VALID_KINDS:
-            # неизвестные теги игнорируем как O
             if start is not None and cur is not None:
                 spans.append((start, i, cur))
             start, cur = None, None
@@ -37,7 +43,6 @@ def _bio_to_token_spans(labels: List[str]) -> List[Tuple[int,int,str]]:
                     spans.append((start, i, cur))
                 start, cur = i, k
         else:
-            # неожиданный префикс -> закрываем
             if start is not None and cur is not None:
                 spans.append((start, i, cur))
             start, cur = None, None
@@ -46,7 +51,6 @@ def _bio_to_token_spans(labels: List[str]) -> List[Tuple[int,int,str]]:
     return spans
 
 def _first_valid_offset(offsets: List[Tuple[int,int]], i: int, j: int) -> Optional[Tuple[int,int]]:
-    """найти первый токен с непустым оффсетом в [i, j)."""
     for k in range(i, j):
         s, e = offsets[k]
         if s != e:
@@ -54,7 +58,6 @@ def _first_valid_offset(offsets: List[Tuple[int,int]], i: int, j: int) -> Option
     return None
 
 def _last_valid_offset(offsets: List[Tuple[int,int]], i: int, j: int) -> Optional[Tuple[int,int]]:
-    """найти последний токен с непустым оффсетом в [i, j)."""
     for k in range(j-1, i-1, -1):
         s, e = offsets[k]
         if s != e:
@@ -68,17 +71,28 @@ def _trim_spaces(text: str, s: int, e: int) -> Tuple[int,int]:
         e -= 1
     return s, e
 
+def _shrink_type_by_stopwords(text: str, s: int, e: int) -> Tuple[int,int]:
+    """Обрезает TYPE перед служебным словом (если оно входит в спан)."""
+    sub = text[s:e]
+    pos = 0
+    for part in sub.split():
+        ps = sub.find(part, pos)
+        if ps < 0:
+            break
+        pe = ps + len(part)
+        if part.lower() in STOP_INSIDE_TYPE:
+            return s, s + ps
+        pos = pe
+    return s, e
+
 def _merge_same_type_char_spans(spans: List[Tuple[int,int,str]]) -> List[Tuple[int,int,str]]:
-    """
-    Мерж пересекающихся/смежных спанов одного и того же типа.
-    """
     if not spans:
         return spans
-    spans = sorted(spans, key=lambda x: (x[2], x[0], x[1]))  # по типу, затем по началу
+    spans = sorted(spans, key=lambda x: (x[2], x[0], x[1]))
     out: List[Tuple[int,int,str]] = []
     cs, ce, ck = spans[0]
     for s, e, k in spans[1:]:
-        if k == ck and s <= ce:  # пересекаются/касаются
+        if k == ck and s <= ce:
             ce = max(ce, e)
         else:
             out.append((cs, ce, ck))
@@ -87,20 +101,11 @@ def _merge_same_type_char_spans(spans: List[Tuple[int,int,str]]) -> List[Tuple[i
     return out
 
 def _drop_overlaps_by_longest(spans: List[Tuple[int,int,str]]) -> List[Tuple[int,int,str]]:
-    """
-    Убираем пересечения между разными типами.
-    Жадно берём более длинные, при равной длине — более ранние.
-    """
-    # сортируем по длине убыв., затем по началу
+    """Удаляет пересечения между разными типами: оставляет более длинные, при равной длине — более ранние."""
     order = sorted(spans, key=lambda x: (-(x[1]-x[0]), x[0], x[2]))
     kept: List[Tuple[int,int,str]] = []
     for s, e, k in order:
-        overlap = False
-        for (ks, ke, kk) in kept:
-            if not (e <= ks or s >= ke):
-                overlap = True
-                break
-        if not overlap:
+        if all(e <= ks or s >= ke for (ks, ke, _) in kept):
             kept.append((s, e, k))
     kept.sort(key=lambda x: (x[0], x[1]))
     return kept
@@ -116,18 +121,14 @@ def bio_postprocess(
     return_bio_prefix: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Главная функция постпроцесса.
-    :param labels: BIO-метки на токенах
-    :param offsets: список (start_char, end_char) на токен
-    :param text: исходный текст (для тримминга пробелов)
-    :param return_bio_prefix: если True — entity будет 'B-XXX', иначе просто 'XXX'
-    :return: список спанов [{"start_index","end_index","entity"}, ...]
+    Склейка BIO и восстановление символьных индексов.
+    :return: [{"start_index","end_index","entity"}]
     """
     if len(labels) != len(offsets):
         raise ValueError(f"len(labels) != len(offsets): {len(labels)} vs {len(offsets)}")
 
     # 1) BIO -> токенные спаны
-    tok_spans = _bio_to_token_spans(labels)  # (ti, tj, kind)
+    tok_spans = _bio_to_token_spans(labels)
 
     # 2) токенные -> символьные
     char_spans: List[Tuple[int,int,str]] = []
@@ -139,6 +140,8 @@ def bio_postprocess(
             continue
         s = max(0, min(head[0], L))
         e = max(0, min(tail[1], L))
+        if kind == "TYPE":
+            s, e = _shrink_type_by_stopwords(text, s, e)
         if trim_whitespace:
             s, e = _trim_spaces(text, s, e)
         if s < e:
@@ -159,13 +162,23 @@ def bio_postprocess(
         out.append({"start_index": int(s), "end_index": int(e), "entity": ent})
     return out
 
-if __name__ == "__main__":
-    text = "abtoys игрушки 2 л"
-    tokens = ["ab", "##to", "##ys", "игрушки", "2", "л"]
-    offsets = [(0,2),(2,4),(4,6),(7,14),(15,16),(17,18)]
-    labels  = ["B-BRAND","I-BRAND","I-BRAND","B-TYPE","B-VOLUME","I-VOLUME"]
-    spans = bio_postprocess(labels, offsets, text)
-    # [{'start_index': 0, 'end_index': 6, 'entity': 'BRAND'},
-    #  {'start_index': 7, 'end_index': 14, 'entity': 'TYPE'},
-    #  {'start_index': 15, 'end_index': 18, 'entity': 'VOLUME'}]
-    print(spans)
+# ---- Доп: подтверждение единиц/процентов по regex (использовать в API после bio_postprocess) ----
+def merge_units(text: str, spans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Добавляет/исправляет VOLUME и PERCENT по regex, не заезжая на существующие спаны других типов.
+    """
+    keep = [dict(s) for s in spans if s.get("entity") not in {"VOLUME", "PERCENT"}]
+
+    def add_span(s: int, e: int, ent: str):
+        for t in keep:
+            if not (e <= t["start_index"] or s >= t["end_index"]):
+                return  # пересекается — пропускаем
+        keep.append({"start_index": s, "end_index": e, "entity": ent})
+
+    for m in RE_VOL.finditer(text):
+        add_span(m.start(), m.end(), "VOLUME")
+    for m in RE_PCT.finditer(text):
+        add_span(m.start(), m.end(), "PERCENT")
+
+    keep.sort(key=lambda x: (x["start_index"], x["end_index"]))
+    return keep

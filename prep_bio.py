@@ -1,15 +1,13 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 prep_bio.py — подготовка BIO-разметки из train.csv
 
-Функционал:
-- Чтение CSV (sample, annotation)
-- Санитайз спанов: клип границ, '0'→'O', удаление 'O'-спанов
-- Токенизация: HF fast (по умолчанию ai-forever/ruBert-base) или fallback regex
+- Читает CSV (по умолчанию: sample, annotation)
+- Нормализует текст в Unicode NFC (убирает артефакты типа 'яи' вместо 'й')
+- Санитизирует спаны: клип границ, '0'→'O', удаляет 'O'-спаны
+- Токенизация: HF fast (ai-forever/ruBert-base) или fallback regex
 - BIO-теги для TYPE/BRAND/VOLUME/PERCENT с корректным offset_mapping
 - Сохранение JSONL/CoNLL + meta/labels/summary
-- (Опц.) train/val split с гарантией, что во val есть все типы
+- (Опц.) train/val split с гарантией наличия всех типов во val
 
 Пример:
   python prep_bio.py --in data/train.csv --out ./x5_bio \
@@ -28,6 +26,14 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Set, cast
 
 import pandas as pd
+
+# --- нормализация текста ---
+try:
+    from utils.textnorm import normalize_nfc
+except Exception:
+    def normalize_nfc(s: str) -> str:
+        import unicodedata
+        return unicodedata.normalize("NFC", str(s))
 
 # ====== Константы ======
 VALID_KINDS: Set[str] = {"TYPE", "BRAND", "VOLUME", "PERCENT"}
@@ -194,12 +200,14 @@ def build_record(
     hf_tok=None,
     rec_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    # нормализация текста перед любыми операциями
+    text_norm = normalize_nfc(text)
     spans_merged = merge_char_spans(ann_list)
-    tokens, offsets = tokenize_text(text, mode=mode, hf_tok=hf_tok)
+    tokens, offsets = tokenize_text(text_norm, mode=mode, hf_tok=hf_tok)
     labels = spans_to_bio_for_tokens(offsets, spans_merged)
     return {
         "id": int(rec_id) if rec_id is not None else None,
-        "text": text,
+        "text": text_norm,
         "tokens": tokens,
         "offsets": offsets,
         "labels": labels,
@@ -308,7 +316,8 @@ def process(
         raise RuntimeError(f"Не удалось прочитать {in_csv}. Пробовал разделители: {tried}. "
                            f"Ожидаю колонки: {text_col}, {ann_col}")
 
-    texts: List[str] = df[text_col].astype(str).tolist()
+    texts_raw: List[str] = df[text_col].astype(str).tolist()
+    texts: List[str] = [normalize_nfc(t) for t in texts_raw]
     ann_raw: List[List[Tuple[int, int, str]]] = [parse_ann_cell(x) for x in df[ann_col].tolist()]
     ann_list: List[List[Tuple[int, int, str]]] = [sanitize_ann(t, a) for t, a in zip(texts, ann_raw)]
 
@@ -335,7 +344,7 @@ def process(
     do_split = (not no_split) and (val_size is not None) and (val_size > 0.0)
     train_recs, val_recs = records, []
     if do_split:
-        vs: float = cast(float, val_size)  # <-- фикс для Pylance/mypy
+        vs: float = cast(float, val_size)  # типобезопасно
         train_idx, val_idx = try_make_split(texts, ann_list, vs, seed)
         train_recs = [records[i] for i in train_idx]
         val_recs = [records[i] for i in val_idx]
@@ -366,6 +375,7 @@ def process(
         "ann_col": ann_col,
         "val_size": float(val_size or 0.0),
         "seed": seed,
+        "unicode_norm": "NFC",
     }
     save_json(os.path.join(out_dir, "meta.json"), meta)
     save_json(os.path.join(out_dir, "label_list.json"), LABEL_LIST)
