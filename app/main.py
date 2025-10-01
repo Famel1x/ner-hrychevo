@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from app.api.v1.predict import router as predict_router
 from app.services.predictor import NerModel, AsyncPredictor
 from app.core.config import settings
@@ -8,7 +8,6 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        # загрузка/инициализация модели
         model = NerModel(settings.model_path)
         app.state.predictor = AsyncPredictor(model, max_workers=settings.max_workers)
 
@@ -21,6 +20,10 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
+
+    @app.get("/debug/model")
+    async def model_info(request: Request) -> dict:
+        return request.app.state.predictor.info()
 
     return app
 

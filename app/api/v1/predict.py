@@ -9,7 +9,6 @@ router = APIRouter()
 async def predict(body: PredictIn, request: Request) -> PredictOut:
     predictor = request.app.state.predictor
     try:
-        # страхуем SLA: не дольше ~0.95с
         return await asyncio.wait_for(
             predictor.predict(body.input),
             timeout=settings.request_timeout_s,

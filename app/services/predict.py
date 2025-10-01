@@ -6,22 +6,10 @@ from typing import Dict, List
 Span = Dict[str, int | str]
 
 class NerModel:
-    """
-    Обёртка реальной NER-модели.
-    Сейчас — быстрая правило-based заглушка, которая:
-      - бьёт текст на токены по \S+
-      - первому слову ставит B-TYPE, остальным I-TYPE
-      - для слов после первого включает ОДИН предшествующий пробел в диапазон,
-        чтобы совпасть с примером ответа:
-          "сгущенное молоко" -> [0..8], [9..15]
-    Замените метод predict на вызов вашей ML-модели, вернув те же поля.
-    """
     _token_re = re.compile(r"\S+")
 
     def __init__(self, model_path: str):
         self.model_path = model_path
-        # здесь можно загрузить веса/токенайзер и т.п.
-        # self.pipeline = load_pipeline(model_path)
 
     def predict(self, text: str) -> List[Span]:
         spans: List[Span] = []
@@ -45,11 +33,6 @@ class NerModel:
 
 
 class AsyncPredictor:
-    """
-    Неблокирующая обёртка:
-    sync-инференс модели выполняется в ThreadPoolExecutor,
-    чтобы event loop FastAPI оставался свободным.
-    """
     def __init__(self, model: NerModel, max_workers: int):
         self.model = model
         self._pool = ThreadPoolExecutor(max_workers=max_workers)
